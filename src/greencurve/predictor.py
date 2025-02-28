@@ -251,15 +251,19 @@ def plot_forecast(historical_data_original, forecast, extra_data, plot_start, pl
     # Plot Historical Data (Before User Modifications)
     plt.plot(historical_data_original['ds'], historical_data_original['y'], color='blue', label="Historical Data (Observed)", alpha=0.6)
 
-    # Plot Forecasted Data
-    plt.plot(forecast['ds'], forecast['yhat'], linestyle="dashed", color="orange", label="Predicted Data (Prophet)")
+    plt.plot(forecast['ds'], forecast['renewable_mw'], linestyle="dashed", color="orange", label="Predicted Renewable Energy (MW)")
+
+    # Plot Total Load
+    plt.plot(forecast['ds'], forecast['total_load'], linestyle="dotted", color="red", label="Predicted Total Load (MW)")
+
+    ax1 = plt.gca()
 
     # Highlight User Override Data
     first_label = True  
     for date_str, values in extra_data.items():
         date_dt = pd.to_datetime(date_str)
         override_times = [date_dt + pd.Timedelta(hours=i) for i in range(24)]
-        override_values = [(values[i] / 100) * forecast['yhat'].mean() for i in range(24)]  # Use forecast mean as approximation
+        override_values = [(values[i] / 100) * forecast['total_load'].mean() for i in range(24)]  # Use forecast mean as approximation
         if first_label:
             plt.scatter(override_times, override_values, color="green", label="User Override Data", marker="x")
             first_label = False  
@@ -268,8 +272,8 @@ def plot_forecast(historical_data_original, forecast, extra_data, plot_start, pl
 
     # Ensure labels and legend
     plt.xlabel("Date")
-    plt.ylabel("Renewable Energy Production (MW)")
-    plt.title(f"Renewable Energy Prediction for {country}")
+    ax1.set_ylabel("Energy (MW)")
+    plt.title(f"Renewable Energy & Total Load Prediction for {country}")
     plt.legend()
     plt.grid(True)
 
@@ -334,59 +338,67 @@ def tune_prophet_model(data: pd.DataFrame, param_grid: Dict[str, List[float]],
     for cps in param_grid.get('changepoint_prior_scale', [0.05]):
         for sps in param_grid.get('seasonality_prior_scale', [10.0]):
             for mode in param_grid.get('seasonality_mode', ['additive']):
-                for fourier_order in param_grid.get('daily_fourier_order', [10]):
-                    _logger.info("Tuning with cps=%.4f, sps=%.4f, mode=%s, daily_fourier_order=%d", 
-                                 cps, sps, mode, fourier_order)
-                    model = Prophet(
-                        changepoint_prior_scale=cps,
-                        seasonality_prior_scale=sps,
-                        seasonality_mode=mode,
-                        daily_seasonality=False,  # disable built-in daily seasonality
-                        weekly_seasonality=True,
-                        yearly_seasonality=True
-                    )
-                    # Add custom daily seasonality with the specified Fourier order.
-                    model.add_seasonality(name='daily', period=1, fourier_order=fourier_order)
-                    
-                    try:
-                        model.fit(data)
-                    except Exception as e:
-                        _logger.error("Model failed to fit: %s", e)
-                        continue
+                for daily_fourier_order in param_grid.get('daily_fourier_order', [10]):
+                    for weekly_fourier_order in param_grid.get('weekly_fourier_order', [5]):
+                        _logger.info("Tuning with cps=%.4f, sps=%.4f, mode=%s, daily_fourier_order=%d, weekly_fourier_order=%d", 
+                                     cps, sps, mode, daily_fourier_order, weekly_fourier_order)
+                        # Disable built-in daily and weekly seasonality, add custom ones.
+                        model = Prophet(
+                            changepoint_prior_scale=cps,
+                            seasonality_prior_scale=sps,
+                            seasonality_mode=mode,
+                            daily_seasonality=False,
+                            weekly_seasonality=False,
+                            yearly_seasonality=True
+                        )
+                        # Add custom daily seasonality (period = 1 day)
+                        model.add_seasonality(name='daily', period=1, fourier_order=daily_fourier_order)
+                        # Add custom weekly seasonality (period = 7 days)
+                        model.add_seasonality(name='weekly', period=7, fourier_order=weekly_fourier_order)
+                        
+                        try:
+                            model.fit(data)
+                        except Exception as e:
+                            _logger.error("Model failed to fit: %s", e)
+                            continue
 
-                    try:
-                        df_cv = cross_validation(model, initial=cv_initial, period=cv_period, horizon=cv_horizon, parallel="processes")
-                        df_p = performance_metrics(df_cv)
-                        rmse = df_p['rmse'].mean()
-                        _logger.info("RMSE: %.4f", rmse)
-                    except Exception as e:
-                        _logger.error("Cross validation failed: %s", e)
-                        continue
+                        try:
+                            # Remove parallel processing to reduce open file handles.
+                            df_cv = cross_validation(model, initial=cv_initial, period=cv_period, horizon=cv_horizon)
+                            df_p = performance_metrics(df_cv)
+                            rmse = df_p['rmse'].mean()
+                            _logger.info("RMSE: %.4f", rmse)
+                        except Exception as e:
+                            _logger.error("Cross validation failed: %s", e)
+                            continue
 
-                    if rmse < best_rmse:
-                        best_rmse = rmse
-                        best_params = {
-                            'changepoint_prior_scale': cps,
-                            'seasonality_prior_scale': sps,
-                            'seasonality_mode': mode,
-                            'daily_fourier_order': fourier_order
-                        }
-                        best_model = model
+                        if rmse < best_rmse:
+                            best_rmse = rmse
+                            best_params = {
+                                'changepoint_prior_scale': cps,
+                                'seasonality_prior_scale': sps,
+                                'seasonality_mode': mode,
+                                'daily_fourier_order': daily_fourier_order,
+                                'weekly_fourier_order': weekly_fourier_order
+                            }
+                            best_model = model
 
     if best_model is None:
         _logger.warning("No valid model could be tuned with the given parameter grid. Falling back to default Prophet model.")
         best_model = Prophet(
             daily_seasonality=False,
-            weekly_seasonality=True,
+            weekly_seasonality=False,
             yearly_seasonality=True
         )
         best_model.add_seasonality(name='daily', period=1, fourier_order=10)
+        best_model.add_seasonality(name='weekly', period=7, fourier_order=5)
         valid_data = data.dropna(subset=['y'])
         if valid_data.shape[0] < 2:
             raise ValueError("Not enough valid data to train Prophet model.")
         best_model.fit(valid_data)
     else:
         _logger.info("Best hyperparameters: %s with RMSE: %.4f", best_params, best_rmse)
+        print("Best hyperparameters: ", best_params)
 
     return best_model
 
@@ -394,11 +406,11 @@ def predict_energy_curve(country: str, extra_data: Dict[str, List[float]], curre
     plot: bool = False, plot_date: str = None, tune: bool = False, param_grid: Optional[Dict[str, List[float]]] = None,
     cv_initial: str = '730 days', cv_period: str = '180 days', cv_horizon: str = '365 days') -> pd.DataFrame:
     """
-    Predict the renewable energy production curve (in MW) for the requested number of days.
+    Predict the renewable energy production curve (in MW) and total load for the requested number of days.
 
     - If user provides extra_data, it modifies the historical data before forecasting.
     - The model forecasts from the last available data point (after adding user data) up to `current_date + days`.
-    - Optionally, the model can be tuned via cross-validation to select the best hyperparameters.
+    - The total load is forecasted separately, and the user renewable percentages are applied to the **forecasted** total load.
     - The plot shows historical, modified, and forecasted data separately.
 
     Args:
@@ -406,16 +418,15 @@ def predict_energy_curve(country: str, extra_data: Dict[str, List[float]], curre
         extra_data (Dict[str, List[float]]): Mapping of dates to lists of 24 hourly percentages.
         current_date (str): Forecast start date in "YYYY-MM-DD" format.
         days (int): Number of days to forecast from `current_date`.
-        plot_date (str, optional): The starting date for the plot. Defaults to "2023-12-20".
+        plot_date (str, optional): The starting date for the plot.
         plot (bool): Whether to display a plot of the forecast.
         tune (bool): Whether to perform hyperparameter tuning.
-        param_grid (Optional[Dict[str, List[float]]]): Grid of hyperparameters to search over.
-        cv_initial (str): Initial period for cross-validation.
-        cv_period (str): Period between cutoffs in cross-validation.
-        cv_horizon (str): Forecast horizon in cross-validation.
+        param_grid (Optional[Dict[str, List[float]]] = None): Grid of hyperparameters for tuning.
+        cv_initial, cv_period, cv_horizon (str): Parameters for cross-validation.
 
     Returns:
-        pd.DataFrame: Forecast DataFrame with columns 'ds' (datetime) and 'yhat' (predicted MW).
+        pd.DataFrame: Forecast DataFrame with columns 'ds' (datetime), 'renewable_mw' (predicted Renewable MW), 
+                      'total_load' (predicted total load in MW), and 'renewable_percentage' (predicted renewable %).
     """
     _logger.info("Starting energy prediction for country: %s, date: %s", country, current_date)
 
@@ -423,74 +434,105 @@ def predict_energy_curve(country: str, extra_data: Dict[str, List[float]], curre
     if country.upper() in ["US", "FR", "PL", "NL"]:
         historical_data = load_historical_data(country)
         data_ts = prepare_features(historical_data, total_load_col='TOTAL Actual Load (MW)')
-        avg_total_load = historical_data['TOTAL Actual Load (MW)'].mean() if 'TOTAL Actual Load (MW)' in historical_data.columns else 1
     else:
         raise ValueError("Unsupported country. Available options: US, FR, PL, NL.")
 
     # Store original historical data before modifications for plotting
     historical_data_original = data_ts.copy()
 
-    # Apply user overrides: modify historical data where user provides extra_data
+    # Train **Total Load Prophet Model**
+    _logger.info("Training Prophet model for Total Load forecast...")
+    total_load_model = Prophet(
+        changepoint_prior_scale=0.05,
+        seasonality_prior_scale=1.0,
+        seasonality_mode='additive',
+        daily_seasonality=True,
+        weekly_seasonality=True
+    )
+    total_load_ts = historical_data[['Datetime (UTC)', 'TOTAL Actual Load (MW)']].rename(
+        columns={'Datetime (UTC)': 'ds', 'TOTAL Actual Load (MW)': 'y'}
+    ).dropna()
+    total_load_model.fit(total_load_ts)
+
+    # Determine forecast range
+    last_available_date = data_ts['ds'].max()
+    forecast_start = last_available_date + pd.Timedelta(hours=1)
+    forecast_end = pd.to_datetime(current_date) + pd.Timedelta(days=days)
+
+    # Generate future timestamps for prediction
+    future = pd.DataFrame({"ds": pd.date_range(start=forecast_start, end=forecast_end, freq="H")})
+    _logger.info("Forecasting Total Load for %d future time points", len(future))
+
+    # Predict Total Load
+    total_load_forecast = total_load_model.predict(future)
+    total_load_forecast = total_load_forecast[['ds', 'yhat']].rename(columns={'yhat': 'total_load'})
+
+    # Merge forecasted total load with original time series data
+    data_ts = pd.merge_asof(data_ts, total_load_forecast, on="ds", direction="nearest")
+
+    # Ensure no missing values in total load forecast
+    data_ts['total_load'] = data_ts['total_load'].ffill()
+
+    # Apply **User Overrides** using forecasted total load
     for date_str, values in extra_data.items():
         date_dt = pd.to_datetime(date_str)
         for hour, value in enumerate(values):
             time_point = date_dt + pd.Timedelta(hours=hour)
-            if time_point in data_ts['ds'].values:
-                data_ts.loc[data_ts['ds'] == time_point, 'y'] = (value / 100) * avg_total_load
+
+            # Get the forecasted total load for this specific time
+            forecasted_total_load = total_load_forecast.loc[
+                total_load_forecast['ds'] == time_point, 'total_load'
+            ].values
+
+            if len(forecasted_total_load) > 0:
+                forecasted_total_load = forecasted_total_load[0]
             else:
-                new_row = pd.DataFrame({'ds': [time_point], 'y': [(value / 100) * avg_total_load]})
+                forecasted_total_load = data_ts['total_load'].ffill().iloc[-1]  # Use last known total load
+
+            renewable_mw = (value / 100) * forecasted_total_load
+
+            if time_point in data_ts['ds'].values:
+                data_ts.loc[data_ts['ds'] == time_point, 'y'] = renewable_mw
+            else:
+                new_row = pd.DataFrame({'ds': [time_point], 'y': [renewable_mw], 'total_load': [forecasted_total_load]})
                 data_ts = pd.concat([data_ts, new_row], ignore_index=True)
 
+    # Sort and remove duplicates
     data_ts = data_ts.sort_values('ds').drop_duplicates('ds')
 
-    # Train Prophet model – optionally tuning hyperparameters
-    if tune:
-        if param_grid is None:
-            # Provide default grid if none is given
-            param_grid = {
-            'changepoint_prior_scale': [0.001, 0.01, 0.1, 0.5],
-            'seasonality_prior_scale': [0.1, 1.0, 10.0],
-            'seasonality_mode': ['additive', 'multiplicative'],
-            'daily_fourier_order': [3, 5, 10]
-            }
-        _logger.info("Performing hyperparameter tuning...")
-        model = tune_prophet_model(data_ts, param_grid, cv_initial, cv_period, cv_horizon)
-    else:
-        model = Prophet(daily_seasonality=True,weekly_seasonality=True,yearly_seasonality=True)
-        model.add_seasonality(name='daily', period=1, fourier_order=10)
-        valid_data = data_ts.dropna(subset=['y'])
-        if valid_data.shape[0] < 2:
-            raise ValueError("Not enough valid data to train Prophet model.")
-        model.fit(valid_data)
-        _logger.info("Prophet model trained successfully with default parameters.")
+    # Train Prophet model for **Renewable Energy Forecast**
+    _logger.info("Training Prophet model for Renewable Energy forecast...")
+    model = Prophet(
+        changepoint_prior_scale=0.01,
+        seasonality_prior_scale=0.1,
+        seasonality_mode='additive',
+        daily_seasonality=True,
+        weekly_seasonality=True
+    )
+    valid_data = data_ts.dropna(subset=['y'])
+    if valid_data.shape[0] < 2:
+        raise ValueError("Not enough valid data to train Prophet model.")
+    model.fit(valid_data)
 
-    # Determine forecast range: from the last available date (after adding user data) to `current_date + days`
-    last_available_date = data_ts['ds'].max()
-    forecast_start = last_available_date + pd.Timedelta(hours=1)
-    forecast_end = pd.to_datetime(current_date) + pd.Timedelta(days=days)
-    future = pd.DataFrame({"ds": pd.date_range(start=forecast_start, end=forecast_end, freq="H")})
-    _logger.info("Forecasting for %d future time points", len(future))
+    # Predict Renewable Energy
+    renewable_forecast = model.predict(future)
+    renewable_forecast = renewable_forecast[['ds', 'yhat']].rename(columns={'yhat': 'renewable_mw'})
 
-    forecast = model.predict(future)
+    # Merge Renewable Forecast with Total Load Forecast
+    final_forecast = pd.merge(renewable_forecast, total_load_forecast, on="ds", how="left")
 
-    # Apply extra data overrides in forecast results
-    forecast_dates = forecast['ds'].dt.strftime("%Y-%m-%d")
-    for idx, date_str in forecast_dates.iteritems():
-        if date_str in extra_data:
-            override_list = extra_data[date_str]
-            if len(override_list) == 24:
-                hour = forecast.loc[idx, 'ds'].hour
-                adjusted_value = (override_list[hour] / 100) * avg_total_load
-                forecast.at[idx, 'yhat'] = adjusted_value
-            else:
-                _logger.warning("Override list for %s does not contain 24 values.", date_str)
+    # Compute **Predicted Renewable Percentage**
+    final_forecast['renewable_percentage'] = (final_forecast['renewable_mw'] / final_forecast['total_load']) * 100
+
+    # Ensure correct return columns
+    final_forecast = final_forecast[['ds', 'renewable_mw', 'total_load', 'renewable_percentage']]
 
     # Determine plot start date
-    plot_start = pd.to_datetime(plot_date) if plot_date else pd.to_datetime("2023-12-20")
-    plot_end = forecast['ds'].max()
+    plot_start = pd.to_datetime(plot_date) if plot_date else pd.to_datetime(current_date) - pd.Timedelta(days=7)
+    plot_end = final_forecast['ds'].max()
 
     if plot:
-        plot_forecast(historical_data_original, forecast, extra_data, plot_start, plot_end, country, days)
+        plot_forecast(historical_data_original, final_forecast, extra_data, plot_start, plot_end, country, days)
 
     _logger.info("Prediction completed")
-    return forecast[['ds', 'yhat']]
+    return final_forecast
