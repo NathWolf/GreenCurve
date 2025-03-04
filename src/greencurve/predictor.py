@@ -1,4 +1,6 @@
 import logging
+import warnings
+
 from typing import List, Dict, Optional
 import os
 import pandas as pd
@@ -7,6 +9,10 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates 
 from prophet import Prophet
 from prophet.diagnostics import cross_validation, performance_metrics
+
+warnings.simplefilter(action="ignore", category=FutureWarning)
+logging.getLogger("cmdstanpy").setLevel(logging.CRITICAL)  # Hide all non-critical logs
+
 
 
 _logger = logging.getLogger(__name__)
@@ -28,9 +34,6 @@ def load_data_from_file(file_path: str) -> pd.DataFrame:
         df = pd.read_csv(file_path, delimiter=',')
         df.columns = df.columns.str.strip()  # clean up header spaces
         file_size = os.path.getsize(file_path)
-        print(f"Loaded file: {file_path}")
-        print(f"  Shape: {df.shape} (rows, columns)")
-        print(f"  File size: {file_size} bytes")
     except Exception as e:
         _logger.error(f"Error reading {file_path}: {e}")
         raise
@@ -60,7 +63,6 @@ def load_renewable_data(country: str) -> pd.DataFrame:
     df = pd.concat(dfs, ignore_index=True)
     df.columns = df.columns.str.strip()
     df["Datetime (UTC)"] = pd.to_datetime(df["Datetime (UTC)"])
-    print("Successfully loaded renewable data. ")
     return df[["Datetime (UTC)", "Renewable Percentage"]]
 
 def load_total_load_data(country: str) -> pd.DataFrame:
@@ -84,7 +86,6 @@ def load_total_load_data(country: str) -> pd.DataFrame:
         filenames = [f for f in os.listdir(data_dir) if f.startswith("ercot_load_act_hr_") and f.endswith(".csv")]
         if not filenames:
             raise FileNotFoundError(f"No total load data found for country: {country}")
-        print("Successfully loaded total load data. ")
         dfs = [load_data_from_file(get_data_path(fname, folder)) for fname in filenames]
         df = pd.concat(dfs, ignore_index=True)
         df.columns = df.columns.str.strip()
@@ -98,7 +99,6 @@ def load_total_load_data(country: str) -> pd.DataFrame:
         filenames = [f for f in os.listdir(data_dir) if f.startswith("Actual Generation per Production Type_") and f.endswith(f"_{country}.csv")]
         if not filenames:
             raise FileNotFoundError(f"No total load data found for country: {country}")
-        print("Successfully loaded total load data. ")
         dfs = [load_data_from_file(get_data_path(fname, folder)) for fname in filenames]
         df = pd.concat(dfs, ignore_index=True)
         df.columns = df.columns.str.strip()

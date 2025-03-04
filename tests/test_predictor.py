@@ -12,8 +12,9 @@ def test_prediction():
     extra_data = {}
 
     # Forecast **48 hours** from January 11, 2024, and plot only from December 20, 2023
-    forecast = predict_energy_curve("NL", extra_data, current_date="2024-01-01", days=7, plot=True, plot_date="2023-12-20")
+    forecast = predict_energy_curve("NL", extra_data, current_date="2024-01-01", days=7, plot=False, plot_date="2023-12-20")
         
     # Print the forecast for review (use pytest -s to see the output)
     print("Predicted Forecast:")
     print(forecast[['ds', 'renewable_mw', 'renewable_percentage', 'total_load']])
+    print(forecast['renewable_mw'])
