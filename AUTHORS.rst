@@ -2,4 +2,4 @@
 Contributors
 ============
 
-* Nathalia <nathaliaiwolf@gmail.com>
+* Nathalia <nwolf@optimai.cl>
