@@ -1,20 +1,23 @@
-# GreenCurve
+GreenCurve
+==========
 
-GreenCurve is a machine learning tool designed to predict the 24-hour renewable energy production curve for the upcoming day using historical data from US and ERCOT sources. Leveraging multiple forecasting models—including Facebook's Prophet, SARIMAX, XGBoost, and a moving average approach—GreenCurve provides robust predictions and insights into future energy trends. It also includes visualization tools to compare model forecasts against real test data.
+**GreenCurve** is a machine learning tool designed to predict the 24-hour renewable energy production curve for the upcoming day using historical data from US and ERCOT sources. Leveraging multiple forecasting models—including Facebook's Prophet, SARIMAX, XGBoost, and a moving average approach—GreenCurve provides robust predictions and insights into future energy trends. It also includes visualization tools to compare model forecasts against real test data.
 
-## Table of Contents
+Table of Contents
+-----------------
 
-- [Features](#features)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Configuration](#configuration)
-- [Model Overview](#model-overview)
-- [Examples](#examples)
-- [Contributing](#contributing)
-- [License](#license)
-- [Contact](#contact)
+- `Features <#features>`_
+- `Installation <#installation>`_
+- `Usage <#usage>`_
+- `Configuration <#configuration>`_
+- `Model Overview <#model-overview>`_
+- `Examples <#examples>`_
+- `Contributing <#contributing>`_
+- `License <#license>`_
+- `Contact <#contact>`_
 
-## Features
+Features
+--------
 
 - **Multi-Model Forecasting:**  
   Predict renewable energy production using several methods (Prophet, SARIMAX, XGBoost, and moving average) for robust and comparative performance.
@@ -31,75 +34,103 @@ GreenCurve is a machine learning tool designed to predict the 24-hour renewable 
 - **Easy Integration:**  
   Use GreenCurve as a standalone tool or as a module within your Python projects.
 
-## Clone and Install Dependencies
+Installation
+------------
 
-Ensure you have Python 3.7 or later installed, then clone the repository and install the required dependencies:
+Ensure you have Python 3.7 or later installed. Clone the repository and install the required dependencies:
 
-```bash
-git clone https://github.com/yourusername/GreenCurve.git
-cd GreenCurve
-pip install -r requirements.txt
-```
+.. code-block:: bash
 
-Run pytest -s tests/test.py to ensure all tests pass.
+    git clone https://github.com/yourusername/GreenCurve.git
+    cd GreenCurve
+    pip install -r requirements.txt
 
-## Usage
+Run the test suite to ensure everything works:
 
-GreenCurve can be used both as a standalone script and as an importable module. Below is an example usage in a Python script:
-```bash
-from greencurve import predict_energy_curve
+.. code-block:: bash
 
-# Predict the renewable energy production curve for a given day
-forecast = predict_energy_curve(
-    country="US", 
-    extra_data={},         # Optionally provide override data
-    current_date="2024-01-12",
-    days=1,                # Forecast for 24 hours (1 day)
-    plot=True              # Display forecast plots
-)
+    pytest -s tests/test.py
 
-print(forecast.head())
-```
+Usage
+-----
 
-## Configuration
+GreenCurve can be used both as a standalone script and as an importable module. Example usage:
+
+.. code-block:: python
+
+    from greencurve import predict_energy_curve
+
+    # Predict the renewable energy production curve for a given day
+    forecast = predict_energy_curve(
+        country="US", 
+        extra_data={},         # Optionally provide override data
+        current_date="2024-01-12",
+        days=1,                # Forecast for 24 hours (1 day)
+        plot=True              # Display forecast plots
+    )
+
+    print(forecast.head())
+
+Configuration
+-------------
 
 GreenCurve offers flexibility in configuring forecasting parameters:
 
 - **Training Period:**  
-  Set the number of days used for training (`history_days`). This parameter determines how many past days of data are used to train the forecasting models.
+  Set the number of days used for training (``history_days``).
 
 - **Forecast Horizon:**  
-  Define the number of forecast steps (typically set as the number of hours in the forecast period). For example, for a 24-hour forecast, `forecast_steps` is set to 24.
+  Define the number of forecast steps (e.g., ``forecast_steps = 24`` for a 24-hour forecast).
 
 - **Model Tuning:**  
   You can adjust parameters for each forecasting method directly in the code:
-  
+
   - **Prophet Parameters:**  
-    Configure the number of changepoints, `changepoint_prior_scale`, `seasonality_prior_scale`, and the Fourier orders for daily and weekly seasonalities.
-  
+    Configure `changepoint_prior_scale`, `seasonality_prior_scale`, and Fourier orders.
+
   - **SARIMAX Parameters:**  
-    Set the autoregressive, differencing, and moving average orders (`order`) as well as the seasonal order (`seasonal_order`).
-  
+    Set `order` (p, d, q) and `seasonal_order` (P, D, Q, s).
+
   - **XGBoost Parameters:**  
-    Customize the number of estimators, learning rate, and other hyperparameters as needed.
+    Customize `n_estimators`, `learning_rate`, etc.
 
-Additional configuration can be managed through external configuration files if required.
+You may also manage configuration through external config files if needed.
 
-## Model Overview
+Model Overview
+--------------
 
 GreenCurve integrates multiple forecasting approaches to improve prediction robustness:
 
 - **Prophet:**  
-  A model specifically designed for forecasting time series data with strong seasonal effects and multiple seasonalities. It detects changepoints and captures yearly seasonality.
+  Designed for time series data with strong seasonal effects. Detects changepoints and captures seasonality.
 
 - **SARIMAX:**  
-  A traditional autoregressive model with seasonal support (Seasonal ARIMA with exogenous variables). It is well-suited for time series data exhibiting trends and seasonality.
+  Seasonal ARIMA with support for exogenous variables. Suitable for trending and seasonal time series.
 
 - **XGBoost:**  
-  A high-performance gradient boosting algorithm enhanced with engineered time-based features. XGBoost is capable of capturing complex nonlinear relationships in the data.
+  Gradient boosting with engineered time-based features. Captures nonlinear relationships.
 
 - **Moving Average:**  
-  A simple baseline method that calculates the hourly average of historical data. This approach provides a dynamic forecast that adapts to hourly patterns rather than a constant value.
+  Baseline method using historical hourly averages.
 
-Each model's predictions are evaluated using standard error metrics like RMSE (Root Mean Squared Error) and MAE (Mean Absolute Error). This multi-model strategy allows you to compare the performance of different approaches and select the best-suited model for your forecasting needs.
+Each model's predictions are evaluated using:
 
+- **RMSE (Root Mean Squared Error)**
+- **MAE (Mean Absolute Error)**
+
+This multi-model strategy enables performance comparison and model selection.
+
+Examples
+--------
+
+Coming soon.
+
+License
+-------
+
+This project is licensed under the MIT License.
+
+Contact
+-------
+
+For inquiries, please contact: nathalia.wolf@inria.fr
