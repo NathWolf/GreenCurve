@@ -14,7 +14,7 @@ def test_forecast_comparison():
     country = "NL"
     horizon_days = 3
     forecast_steps = horizon_days * 24  # hours
-    history_days = 1000
+    history_days = 50
     start_date = "2024-01-01 00:00:00"
     
     # Load extra data from training (raw) data; only include data before the test start.

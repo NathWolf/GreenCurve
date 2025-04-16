@@ -3,6 +3,7 @@ import logging
 import warnings
 from typing import List, Dict, Optional, Tuple
 import os
+import signal
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -10,16 +11,36 @@ import matplotlib.dates as mdates
 
 from prophet import Prophet
 from prophet.diagnostics import cross_validation, performance_metrics
-from statsmodels.tsa.statespace.sarimax import SARIMAX
-from pmdarima import auto_arima
+from pmdarima.arima import ARIMA
 
-import xgboost as xgb
 from xgboost import XGBRegressor
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 logging.getLogger("cmdstanpy").setLevel(logging.CRITICAL)  # Hide non-critical logs
 
 _logger = logging.getLogger(__name__)
+
+# -----------------------
+# Timeout helper for model fitting
+# -----------------------
+
+class TimeoutException(Exception):
+    pass
+
+def timeout_handler(signum, frame):
+    raise TimeoutException("Timeout while fitting the model")
+
+def run_with_timeout(func, timeout, *args, **kwargs):
+    """
+    Runs the given function, but raises TimeoutException if it takes longer than `timeout` seconds.
+    """
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(timeout)
+    try:
+        result = func(*args, **kwargs)
+    finally:
+        signal.alarm(0)
+    return result
 
 # -----------------------
 # Helper functions for file paths
@@ -433,10 +454,6 @@ def iterative_xgb_forecast(model, last_train: pd.DataFrame, forecast_steps: int,
 # Forecasts Based on Prophet
 # -----------------------
 
-# -----------------------
-# Forecasts Based on Prophet
-# -----------------------
-
 def predict_renewable_pct_prophet(country: str, forecast_steps: int, 
                                   extra_data: Optional[pd.DataFrame] = None, 
                                   history_days: int = 400, start_date: Optional[str] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -567,9 +584,7 @@ def predict_total_load_prophet(country: str, forecast_steps: int,
     }).set_index('ds')
     return forecast_df, test
 
-from typing import Optional, Tuple
-import pandas as pd
-from pmdarima.arima import ARIMA
+
 
 # -----------------------
 # Forecasts Based on SARIMAX using ARIMA (via pmdarima)
@@ -578,23 +593,26 @@ from pmdarima.arima import ARIMA
 def predict_total_load_sarimax(country: str, forecast_steps: int, 
                                exog: Optional[pd.DataFrame] = None, 
                                extra_data: Optional[pd.DataFrame] = None, 
-                               history_days: int = 400, start_date: Optional[str] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
+                               history_days: int = 400, start_date: Optional[str] = None,
+                               fit_timeout: int = 60) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Forecast total load data using an ARIMA model.
-    
+    Forecast total load using an enhanced ARIMA model that explores various candidate orders
+    and enforces a maximum time limit on the model fitting.
+
     Parameters:
-        country (str): Country code (e.g. "US", "NL", etc.) to load the appropriate data.
-        forecast_steps (int): The number of hours to forecast.
-        exog (Optional[pd.DataFrame]): Optional exogenous regressors.
-        extra_data (Optional[pd.DataFrame]): Extra data to append (if any).
+        country (str): Country code for data loading.
+        forecast_steps (int): Number of forecast steps (hours).
+        exog (Optional[pd.DataFrame]): Exogenous regressors (if any).
+        extra_data (Optional[pd.DataFrame]): Extra data to append.
         history_days (int): Number of days of historical data to use.
         start_date (Optional[str]): If provided, forecast starting from this date.
-    
+        fit_timeout (int): Maximum seconds allowed for a single ARIMA fit.
+
     Returns:
-        forecast_df (pd.DataFrame): Forecasted values with datetime index.
-        test (pd.DataFrame): Test data (if applicable, else empty DataFrame).
+        forecast_df (pd.DataFrame): Forecasted total load with datetime index.
+        test (pd.DataFrame): Test data (empty if forecasting into the future).
     """
-    # Load total load data (assumes load_total_load_data is defined)
+    # Load and prepare total load data (helper function must be defined)
     total_load_data = load_total_load_data(country)
     total_load_data['Datetime (UTC)'] = pd.to_datetime(total_load_data['Datetime (UTC)'])
     total_load_data = total_load_data.sort_values("Datetime (UTC)")
@@ -606,12 +624,9 @@ def predict_total_load_sarimax(country: str, forecast_steps: int,
                               .drop_duplicates(subset=["Datetime (UTC)"])
     
     total_load_data.set_index("Datetime (UTC)", inplace=True)
-
-    # Use the last history_days worth of data
-    length = str(history_days) + "D"
-    data_subset = total_load_data.last(length)
+    data_subset = total_load_data.last(str(history_days) + "D")
     
-    # Split into train/test unless start_date is specified (in which case, do a future forecast)
+    # Split data into train and test sets or use all data if forecasting future values.
     if start_date:
         train = data_subset
         test = pd.DataFrame()
@@ -619,61 +634,57 @@ def predict_total_load_sarimax(country: str, forecast_steps: int,
         train = data_subset.iloc[:-forecast_steps]
         test = data_subset.iloc[-forecast_steps:]
     
-    # Slice exogenous variables to align with training and forecasting
+    # Align exogenous regressors if provided.
     exog_train = exog.iloc[-len(train):] if exog is not None else None
     exog_test  = exog.iloc[-forecast_steps:] if exog is not None else None
 
-    # Define a custom grid of candidate (p,d,q) orders.
-    # Fixing d=1 and disabling seasonality by setting seasonal_order=(0,0,0,24).
+    # Define candidate grids for nonseasonal (p, d, q) and seasonal orders.
     candidate_orders = [
+        (0, 1, 0),
         (1, 1, 0),
         (1, 1, 1),
-        (0, 1, 1),
-        (1, 1, 0),  # repeated intentionally if you want to count iterations (or add another candidate)
-        (0, 1, 0)
+        (2, 1, 1),
+        (1, 1, 2)
+    ]
+    candidate_seasonal_orders = [
+        (0, 0, 0, 24),   # No seasonal components.
+        (1, 1, 1, 24)    # Allow daily seasonality.
     ]
     
-    # Limit to at most 5 candidate iterations.
-    max_iter = 5
     best_aic = float('inf')
     best_model = None
-    iter_count = 0
 
-    # Grid search over candidate orders
+    # Loop over all combinations with a time limit on each fit.
     for order in candidate_orders:
-        if iter_count >= max_iter:
-            break
-        try:
-            model = ARIMA(
-                order=order,
-                seasonal_order=(0, 0, 0, 24),  # No seasonal AR/MA terms
-                approximation=True
-            )
-            model.fit(train['TOTAL Actual Load (MW)'], exogenous=exog_train)
-            current_aic = model.aic()
-            if current_aic < best_aic:
-                best_aic = current_aic
-                best_model = model
-        except Exception as e:
-            # Skip orders that fail to converge
-            pass
-        iter_count += 1
+        for s_order in candidate_seasonal_orders:
+            try:
+                model = ARIMA(order=order, seasonal_order=s_order, approximation=False)
+                # Fit model with a timeout limit.
+                run_with_timeout(model.fit, fit_timeout, train['TOTAL Actual Load (MW)'], exogenous=exog_train)
+                current_aic = model.aic()
+                if current_aic < best_aic:
+                    best_aic = current_aic
+                    best_model = model
+            except TimeoutException:
+                # Skip candidate if it exceeds the time limit.
+                print(f"Timeout reached when fitting ARIMA order {order} seasonal {s_order}. Skipping...")
+                continue
+            except Exception as e:
+                # Skip candidates that fail due to other errors.
+                # Optionally, log the exception here.
+                continue
 
     if best_model is None:
         raise ValueError("ARIMA model fitting failed for all candidate orders.")
 
-    # Determine the forecasting index based on start_date or test data
+    # Define forecast index.
     if start_date:
         ds_index = pd.date_range(start=pd.to_datetime(start_date), periods=forecast_steps, freq="H")
     else:
         ds_index = test.index
 
-    # Generate forecast using the best model
     forecast_series = best_model.predict(n_periods=forecast_steps, exogenous=exog_test)
-    forecast_df = pd.DataFrame({
-        'ds': ds_index,
-        'total_load_sarimax': forecast_series
-    }).set_index('ds')
+    forecast_df = pd.DataFrame({'ds': ds_index, 'total_load_sarimax': forecast_series}).set_index('ds')
     
     return forecast_df, test
 
@@ -681,23 +692,25 @@ def predict_total_load_sarimax(country: str, forecast_steps: int,
 def predict_renewable_pct_sarimax(country: str, forecast_steps: int, 
                                   exog: Optional[pd.DataFrame] = None, 
                                   extra_data: Optional[pd.DataFrame] = None, 
-                                  history_days: int = 400, start_date: Optional[str] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
+                                  history_days: int = 400, start_date: Optional[str] = None,
+                                  fit_timeout: int = 60) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Forecast renewable percentage data using an ARIMA model.
-    
+    Forecast renewable percentage using an enhanced ARIMA model with a time-limited fit.
+
     Parameters:
         country (str): Country code for data selection.
-        forecast_steps (int): The number of hours to forecast.
-        exog (Optional[pd.DataFrame]): Optional exogenous regressors (unused in this function).
+        forecast_steps (int): Number of forecast steps (hours).
+        exog (Optional[pd.DataFrame]): Exogenous regressors (unused in this function but kept for consistency).
         extra_data (Optional[pd.DataFrame]): Extra data to append.
         history_days (int): Number of days of historical data to use.
         start_date (Optional[str]): If provided, forecast starting from this date.
-    
+        fit_timeout (int): Maximum seconds allowed for a single ARIMA fit.
+
     Returns:
-        forecast_df (pd.DataFrame): Forecasted renewable percentage values with datetime index.
-        test (pd.DataFrame): Test data (if applicable, else empty DataFrame).
+        forecast_df (pd.DataFrame): Forecasted renewable percentage with datetime index.
+        test (pd.DataFrame): Test data (empty if forecasting future values).
     """
-    # Load renewable data (assumes load_renewable_data is defined)
+    # Load and prepare renewable data (helper function must be defined)
     renewable_data = load_renewable_data(country)
     renewable_data["Datetime (UTC)"] = pd.to_datetime(renewable_data["Datetime (UTC)"])
     renewable_data = renewable_data.sort_values("Datetime (UTC)")
@@ -710,12 +723,8 @@ def predict_renewable_pct_sarimax(country: str, forecast_steps: int,
     
     renewable_data.set_index("Datetime (UTC)", inplace=True)
     renewable_data = renewable_data.resample("H").mean().dropna()
+    data_subset = renewable_data.last(str(history_days) + "D")
     
-    # Use the last history_days worth of data
-    length = str(history_days) + "D"
-    data_subset = renewable_data.last(length)
-    
-    # Split into train/test unless start_date is specified
     if start_date:
         train = data_subset
         test = pd.DataFrame()
@@ -723,52 +732,46 @@ def predict_renewable_pct_sarimax(country: str, forecast_steps: int,
         train = data_subset.iloc[:-forecast_steps]
         test = data_subset.iloc[-forecast_steps:]
     
-    # Define candidate orders for grid search over ARIMA parameters
     candidate_orders = [
+        (0, 1, 0),
         (1, 1, 0),
         (1, 1, 1),
-        (0, 1, 1),
-        (0, 1, 0),
-        (1, 1, 0)
+        (2, 1, 1),
+        (1, 1, 2)
     ]
-    max_iter = 5
+    candidate_seasonal_orders = [
+        (0, 0, 0, 24),
+        (1, 1, 1, 24)
+    ]
+    
     best_aic = float('inf')
     best_model = None
-    iter_count = 0
 
     for order in candidate_orders:
-        if iter_count >= max_iter:
-            break
-        try:
-            model = ARIMA(
-                order=order,
-                seasonal_order=(0, 0, 0, 24),  # Disable seasonal AR/MA components
-                approximation=True
-            )
-            model.fit(train["Renewable Percentage"])
-            current_aic = model.aic()
-            if current_aic < best_aic:
-                best_aic = current_aic
-                best_model = model
-        except Exception as e:
-            pass
-        iter_count += 1
+        for s_order in candidate_seasonal_orders:
+            try:
+                model = ARIMA(order=order, seasonal_order=s_order, approximation=False)
+                run_with_timeout(model.fit, fit_timeout, train["Renewable Percentage"])
+                current_aic = model.aic()
+                if current_aic < best_aic:
+                    best_aic = current_aic
+                    best_model = model
+            except TimeoutException:
+                print(f"Timeout reached when fitting ARIMA order {order} seasonal {s_order} for renewable pct. Skipping...")
+                continue
+            except Exception as e:
+                continue
 
     if best_model is None:
         raise ValueError("ARIMA model fitting failed for all candidate orders.")
 
-    # Determine forecast index
     if start_date:
         ds_index = pd.date_range(start=pd.to_datetime(start_date), periods=forecast_steps, freq="H")
     else:
         ds_index = test.index
 
-    # Generate forecast
     forecast_series = best_model.predict(n_periods=forecast_steps)
-    forecast_df = pd.DataFrame({
-        'ds': ds_index,
-        'renewable_pct_sarimax': forecast_series
-    }).set_index('ds')
+    forecast_df = pd.DataFrame({'ds': ds_index, 'renewable_pct_sarimax': forecast_series}).set_index('ds')
     
     return forecast_df, test
 
@@ -1060,7 +1063,7 @@ def compare_forecasts(country: str, forecast_steps: int = 48, start_date: Option
     plt.xlim(common_index[0], common_index[-1])
     plt.ylabel("% Renewable")
     plt.title(f"Percentage Renewable Comparison for {country}")
-    plt.legend()
+    #plt.legend()
     plt.grid(True)
     
     plt.subplot(4, 1, 3)
@@ -1073,7 +1076,7 @@ def compare_forecasts(country: str, forecast_steps: int = 48, start_date: Option
     plt.xlim(common_index[0], common_index[-1])
     plt.ylabel("Renewable MW")
     plt.title(f"Renewable MW Comparison for {country}")
-    plt.legend()
+    #plt.legend()
     plt.grid(True)
     
     plt.subplot(4, 1, 4)
@@ -1089,7 +1092,7 @@ def compare_forecasts(country: str, forecast_steps: int = 48, start_date: Option
     plt.xlim(common_index[0], common_index[-1])
     plt.ylabel("Error (%)")
     plt.title(f"% Renewable Error for {country}")
-    plt.legend()
+    #plt.legend()
     plt.grid(True)
     
     plt.tight_layout()
