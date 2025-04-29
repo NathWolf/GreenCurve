@@ -8,3 +8,7 @@
 """
 
 import pytest
+import warnings
+from holidays.deprecations.v1_incompatibility import FutureIncompatibilityWarning
+
+warnings.filterwarnings("ignore", category=FutureIncompatibilityWarning)
